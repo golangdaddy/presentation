@@ -1,7 +1,8 @@
+
+
 # API Design Document: Fleet Management System
 
-**Phase:** 1.0  
-**Purpose:** This document provides a robust blueprint for the API design of a fleet management system. It includes domain models with updated schemas incorporating cascading privileges, API endpoints, user role hierarchies, entity relationships, and authentication mechanisms. The system manages ports, fleets, assets, and related entities for drone operations, with fine-grained access control.
+**Purpose:** This document provides a robust blueprint for the API design of a fleet management system. It includes domain models with updated schemas incorporating cascading privileges, API endpoints, user role hierarchies, entity relationships, and authentication mechanisms. The system manages ports, fleets, assets, inspections, and related entities for drone operations, with fine-grained access control.
 
 ## User Roles and Hierarchy
 
@@ -10,8 +11,9 @@
 The system implements cascading privileges through a role hierarchy where higher roles inherit all privileges of lower roles. This allows efficient permission checks, ensuring elevated roles can perform subordinate actions without redundancy. The hierarchy is:
 
 - **Viewer**: Can only view records and their children.
-- **Editor**: Inherits all Viewer privileges; can additionally edit records and their children.
-- **Owner**: Inherits all Editor (and Viewer) privileges; can additionally create and delete records and their children.
+- **Reporter**: Inherits all Viewer privileges; can additionally view and log inspections (create and read inspection records).
+- **Editor**: Inherits all Reporter (and Viewer) privileges; can additionally edit records and their children, including scheduling and updating inspections.
+- **Owner**: Inherits all Editor (and Reporter, Viewer) privileges; can additionally create and delete records and their children.
 
 Permissions are enforced in application logic: For any endpoint, verify if the user's effective role level meets or exceeds the minimum required.
 
@@ -26,7 +28,7 @@ Permission checks:
 1. Query explicit Permission for user/entity.
 2. If absent, recurse up hierarchy for inheritable role.
 3. Fall back to user's global role.
-4. Compare role level (Viewer=1, Editor=2, Owner=3) against endpoint minimum.
+4. Compare role level (Viewer=1, Reporter=2, Editor=3, Owner=4) against endpoint minimum.
 
 This enables flexible, scalable access (e.g., Owner on a Port inherits Owner on child Fleets unless overridden).
 
@@ -73,7 +75,12 @@ Below is an ASCII diagram illustrating the relationships between the domain enti
 +-------+                      
 | Asset |                      
 +-------+                      
-   ^                           
+   ^      1-*
+   |      |
+   |      v
+   |   +----------+
+   |   |Inspection|
+   |   +----------+
    | 1-*                       
    v                           
 +----------+                   
@@ -89,6 +96,7 @@ Below is an ASCII diagram illustrating the relationships between the domain enti
 - **Manufacturer** 1-* **Asset-Template**: A manufacturer can produce multiple asset templates.
 - **Manufacturer** 1-* **Component**: A manufacturer can produce multiple components.
 - **Asset** 1-* **Asset-Part**: An asset can have multiple parts (instances of template components).
+- **Asset** 1-* **Inspection**: An asset can have multiple inspections.
 - **Fleet** 1-* **Asset**: A fleet can have multiple assets.
 
 ### Database Schemas
@@ -97,48 +105,8 @@ Below is an ASCII diagram illustrating the relationships between the domain enti
 ```sql
 CREATE TABLE Roles (
     id VARCHAR(64) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL UNIQUE,  -- e.g., 'Viewer', 'Editor', 'Owner'
-    level INT NOT NULL  -- e.g., 1 for Viewer, 2 for Editor, 3 for Owner
-);
-```
-
-#### Permissions
-```sql
-CREATE TABLE Permissions (
-    id VARCHAR(64) PRIMARY KEY,
-    user_id VARCHAR(64) NOT NULL,
-    entity_type VARCHAR(255) NOT NULL,  -- e.g., 'Port', 'Fleet', 'Asset'
-    entity_id VARCHAR(64) NOT NULL,
-    role_id VARCHAR(64) NOT NULL,
-    time_created BIGINT NOT NULL,
-    time_updated BIGINT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES Users(id),
-    FOREIGN KEY (role_id) REFERENCES Roles(id),
-    UNIQUE (user_id, entity_type, entity_id)  -- One role per user per entity
-);
-```
-
-#### Manufacturers
-```sql
-CREATE TABLE Manufacturers (
-    id VARCHAR(64) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    country VARCHAR(255),
-    time_created BIGINT NOT NULL,
-    time_updated BIGINT NOT NULL
-);
-```
-
-#### Users
-```sql
-CREATE TABLE Users (
-    id VARCHAR(64) PRIMARY KEY,
-    username VARCHAR(255) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
-    role_id VARCHAR(64),  -- Global default role
-    time_created BIGINT NOT NULL,
-    time_updated BIGINT NOT NULL,
-    FOREIGN KEY (role_id) REFERENCES Roles(id)
+    name VARCHAR(255) NOT NULL UNIQUE,  -- e.g., 'Viewer', 'Reporter', 'Editor', 'Owner'
+    level INT NOT NULL  -- e.g., 1 for Viewer, 2 for Reporter, 3 for Editor, 4 for Owner
 );
 ```
 
@@ -238,6 +206,25 @@ CREATE TABLE AssetParts (
     serial_number VARCHAR(255),
     condition VARCHAR(255),
     notes TEXT,
+    inspection_frequency BIGINT, -- days between inspections
+    FOREIGN KEY (asset_id) REFERENCES Assets(id),
+    FOREIGN KEY (component_id) REFERENCES Components(id)
+);
+```
+
+#### Inspections
+```sql
+CREATE TABLE Inspections (
+    id VARCHAR(64) PRIMARY KEY,
+    asset_id VARCHAR(64) NOT NULL,
+    component_id VARCHAR(64),
+    serial_number VARCHAR(255),
+    action VARCHAR(255), -- e.g., 'replaced', 'repaired', 'inspected'
+    condition VARCHAR(255), -- e.g., 'new', 'damaged', 'functional'
+    notes TEXT,
+    time BIGINT NOT NULL,
+    time_created BIGINT NOT NULL,
+    time_updated BIGINT NOT NULL,
     FOREIGN KEY (asset_id) REFERENCES Assets(id),
     FOREIGN KEY (component_id) REFERENCES Components(id)
 );
@@ -252,6 +239,46 @@ CREATE TABLE Sessions (
     time_created BIGINT NOT NULL,
     time_updated BIGINT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES Users(id)
+);
+```
+
+#### Manufacturers
+```sql
+CREATE TABLE Manufacturers (
+    id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    country VARCHAR(255),
+    time_created BIGINT NOT NULL,
+    time_updated BIGINT NOT NULL
+);
+```
+
+#### Permissions
+```sql
+CREATE TABLE Permissions (
+    id VARCHAR(64) PRIMARY KEY,
+    user_id VARCHAR(64) NOT NULL,
+    entity_type VARCHAR(255) NOT NULL,  -- e.g., 'Port', 'Fleet', 'Asset', 'Inspection'
+    entity_id VARCHAR(64) NOT NULL,
+    role_id VARCHAR(64) NOT NULL,
+    time_created BIGINT NOT NULL,
+    time_updated BIGINT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES Users(id),
+    FOREIGN KEY (role_id) REFERENCES Roles(id),
+    UNIQUE (user_id, entity_type, entity_id)  -- One role per user per entity
+);
+```
+
+#### Users
+```sql
+CREATE TABLE Users (
+    id VARCHAR(64) PRIMARY KEY,
+    username VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role_id VARCHAR(64),  -- Global default role (e.g., 'Viewer', 'Reporter', 'Editor', 'Owner')
+    time_created BIGINT NOT NULL,
+    time_updated BIGINT NOT NULL,
+    FOREIGN KEY (role_id) REFERENCES Roles(id)
 );
 ```
 
@@ -271,7 +298,7 @@ Creates a new user.
 {
     "username": "newuser",
     "password": "password123",
-    "role": "viewer"
+    "role": "viewer"  -- Can also be 'reporter', 'editor', 'owner'
 }
 ```
 Minimum role: Owner  
@@ -284,7 +311,7 @@ Returns user data.
     "type": "user",
     "fields": {
         "username": "newuser",
-        "role": "viewer"
+        "role": "reporter"
     }
 }
 ```
@@ -294,7 +321,7 @@ Minimum role: Viewer
 Updates user fields.
 ```
 {
-    "role": "editor"
+    "role": "reporter"
 }
 ```
 Minimum role: Owner  
@@ -484,6 +511,38 @@ Returns fleet data.
 ```
 Minimum role: Viewer  
 
+#### /fleet/:fleet_id/compliance (GET)
+Returns compliance information for the fleet, listing assets with overdue inspection parts.
+```
+{
+    "fleet_id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+    "assets_with_overdue_parts": [
+        {
+            "asset_id": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+            "asset_name": "My New Drone A",
+            "overdue_parts": [
+                {
+                    "part_id": "5f873f7e0bd101ba77dbc40a6ea76771cfe5a5e0ef3da03938a282821ef4c0d6",
+                    "part_name": "Front-left rotor blades",
+                    "last_inspection_time": 1690867200000,
+                    "inspection_frequency": 30,
+                    "days_overdue": 15
+                },
+                {
+                    "part_id": "d1a6c49d4c0cb7b729ed20a20f17f4d7c5f3a2d52246d49786019b9fd729e254",
+                    "part_name": "Battery pack",
+                    "last_inspection_time": null,
+                    "inspection_frequency": 14,
+                    "days_overdue": 45
+                }
+            ]
+        }
+    ]
+}
+```
+Minimum role: Viewer  
+Note: Overdue is calculated as current time - last inspection time > inspection_frequency * 86400000 (assuming times in milliseconds). If no last inspection, treated as overdue if inspection_frequency > 0.
+
 ### Asset Instances
 
 An asset instance is an instance of an asset-template that can be managed individually.
@@ -502,7 +561,7 @@ Creates a new asset.
 Minimum role: Owner  
 
 #### /asset/:asset_id (GET)
-Returns asset data.
+Returns asset data, including asset parts with inspection frequency.
 ```
 {
     "id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
@@ -515,25 +574,56 @@ Returns asset data.
         "warranty": "1y"
     },
     "components": [
-        "5f873f7e0bd101ba77dbc40a6ea76771cfe5a5e0ef3da03938a282821ef4c0d6",
-        "d1a6c49d4c0cb7b729ed20a20f17f4d7c5f3a2d52246d49786019b9fd729e254",
-        "e62b95cc85caf807581870b03be48547b5f0edb07160eb10b5d2b320f6a8f49c"
+        {
+            "id": "5f873f7e0bd101ba77dbc40a6ea76771cfe5a5e0ef3da03938a282821ef4c0d6",
+            "name": "Front-left rotor blades",
+            "serial_number": "12345",
+            "condition": "new",
+            "notes": "Installed",
+            "inspection_frequency": 30
+        },
+        {
+            "id": "d1a6c49d4c0cb7b729ed20a20f17f4d7c5f3a2d52246d49786019b9fd729e254",
+            "name": "Battery pack",
+            "serial_number": "67890",
+            "condition": "functional",
+            "notes": "Fully charged",
+            "inspection_frequency": 14
+        },
+        {
+            "id": "e62b95cc85caf807581870b03be48547b5f0edb07160eb10b5d2b320f6a8f49c",
+            "name": "Camera module",
+            "serial_number": "11223",
+            "condition": "new",
+            "notes": "Calibrated",
+            "inspection_frequency": 60
+        }
     ]
 }
 ```
 Minimum role: Viewer  
 
 #### /asset/:asset_id/inspections/schedule (POST)
-Schedules inspection.
+Schedules an inspection for an asset.
 ```
 {
     "timestamp": 7978894354358
 }
 ```
 Minimum role: Editor  
+```
+{
+    "id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b",
+    "type": "inspection",
+    "fields": {
+        "asset_id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+        "time": 7978894354358
+    }
+}
+```
 
 #### /asset/:asset_id/inspections/log (POST)
-Logs inspection updates.
+Logs inspection updates for an asset or its components.
 ```
 [
     {
@@ -546,4 +636,76 @@ Logs inspection updates.
     }
 ]
 ```
-Minimum role: Editor
+Minimum role: Reporter  
+```
+[
+    {
+        "id": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+        "type": "inspection",
+        "fields": {
+            "asset_id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+            "component_id": "1bfeada3385656172e88398d453d8e22f661f489b92bdde63f076e30ff46099f",
+            "serial_number": "656172e88398d4",
+            "action": "replaced",
+            "condition": "new",
+            "notes": "was damaged",
+            "time": 78269786307
+        }
+    }
+]
+```
+
+#### /asset/:asset_id/inspections (GET)
+Returns all inspections for an asset.
+```
+{
+    "id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+    "type": "asset",
+    "inspections": [
+        {
+            "id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b",
+            "fields": {
+                "asset_id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+                "time": 7978894354358
+            }
+        },
+        {
+            "id": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+            "fields": {
+                "asset_id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+                "component_id": "1bfeada3385656172e88398d453d8e22f661f489b92bdde63f076e30ff46099f",
+                "serial_number": "656172e88398d4",
+                "action": "replaced",
+                "condition": "new",
+                "notes": "was damaged",
+                "time": 78269786307
+            }
+        }
+    ]
+}
+```
+Minimum role: Viewer  
+
+#### /inspection/:inspection_id (PATCH)
+Updates an inspection's fields.
+```
+{
+    "condition": "repaired",
+    "notes": "Repaired minor damage"
+}
+```
+Minimum role: Editor  
+
+#### /inspection/:inspection_id (DELETE)
+Deletes an inspection.
+Minimum role: Owner  
+
+#### /asset-part/:asset_part_id (PATCH)
+Updates an asset part's fields, including inspection frequency.
+```
+{
+    "inspection_frequency": 45
+}
+```
+Minimum role: Editor  
+
