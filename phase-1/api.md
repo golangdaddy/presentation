@@ -1,5 +1,3 @@
-
-
 # API Design Document: Fleet Management System
 
 **Purpose:** This document provides a robust blueprint for the API design of a fleet management system. It includes domain models with updated schemas incorporating cascading privileges, API endpoints, user role hierarchies, entity relationships, and authentication mechanisms. The system manages ports, fleets, assets, inspections, and related entities for drone operations, with fine-grained access control.
@@ -81,11 +79,16 @@ Below is an ASCII diagram illustrating the relationships between the domain enti
    |   +----------+
    |   |Inspection|
    |   +----------+
-   | 1-*                       
-   v                           
-+----------+                   
-| Asset-Part|                  
-+----------+                   
+   | 1-*     | 1-*
+   v         v
++----------+  +------------+
+| Asset-Part|  | Attachment|
++----------+   +------------+
+               ^
+               |
+               | 1-*
+               |
+               +--- (to Asset and Asset-Part as well, polymorphic)
 ```
 
 - **User** 1-* **Session**: A user can have multiple sessions.
@@ -98,6 +101,10 @@ Below is an ASCII diagram illustrating the relationships between the domain enti
 - **Asset** 1-* **Asset-Part**: An asset can have multiple parts (instances of template components).
 - **Asset** 1-* **Inspection**: An asset can have multiple inspections.
 - **Fleet** 1-* **Asset**: A fleet can have multiple assets.
+- **Inspection** 1-* **Attachment**: An inspection can have multiple attachments (e.g., photos, documents).
+- **Asset** 1-* **Attachment**: An asset can have multiple attachments.
+- **Asset-Part** 1-* **Attachment**: An asset part can have multiple attachments.
+- Attachments are polymorphically associated via entity_type and entity_id for flexibility.
 
 ### Database Schemas
 
@@ -230,6 +237,21 @@ CREATE TABLE Inspections (
 );
 ```
 
+#### Attachments
+```sql
+CREATE TABLE Attachments (
+    id VARCHAR(64) PRIMARY KEY,
+    entity_type VARCHAR(255) NOT NULL,  -- e.g., 'Inspection', 'Asset', 'AssetPart'
+    entity_id VARCHAR(64) NOT NULL,
+    uri VARCHAR(255) NOT NULL,  -- URI to the attachment (e.g., S3 URL)
+    name VARCHAR(255),
+    mime_type VARCHAR(255),  -- e.g., 'image/jpeg', 'application/pdf'
+    time_created BIGINT NOT NULL,
+    time_updated BIGINT NOT NULL
+    -- No foreign key due to polymorphic association; enforced in app logic
+);
+```
+
 #### Sessions
 ```sql
 CREATE TABLE Sessions (
@@ -273,8 +295,7 @@ CREATE TABLE Permissions (
 ```sql
 CREATE TABLE Users (
     id VARCHAR(64) PRIMARY KEY,
-    username VARCHAR(255) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
     role_id VARCHAR(64),  -- Global default role (e.g., 'Viewer', 'Reporter', 'Editor', 'Owner')
     time_created BIGINT NOT NULL,
     time_updated BIGINT NOT NULL,
@@ -286,18 +307,17 @@ CREATE TABLE Users (
 
 ### Authentication and Authorization
 
-- All endpoints (except login) require `Authorization: Bearer <session_id>` header.
-- Session validation: Check expiry and user existence via PKI, cached with a TTL of 5 mins to check for early recovation.
+- All endpoints (except authentication-related) require `Authorization: Bearer <session_id>` header.
+- Session validation: Check expiry and user existence via PKI, cached with a TTL of 5 mins to check for early revocation.
 - Role enforcement: Compute effective role per request; return 403 if insufficient.
 
 ### User Management
 
 #### /user (POST)
-Creates a new user.
+Creates a new user and sends a magic link to the provided email for initial login.
 ```
 {
-    "username": "newuser",
-    "password": "password123",
+    "email": "newuser@example.com",
     "role": "viewer"  -- Can also be 'reporter', 'editor', 'owner'
 }
 ```
@@ -310,7 +330,7 @@ Returns user data.
     "id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
     "type": "user",
     "fields": {
-        "username": "newuser",
+        "email": "newuser@example.com",
         "role": "reporter"
     }
 }
@@ -329,14 +349,18 @@ Minimum role: Owner
 ### Session Management
 
 #### /session (POST)
-Creates a session (login).
+Requests a magic link for login (sent to the user's email).
 ```
 {
-    "username": "newuser",
-    "password": "password123"
+    "email": "newuser@example.com"
 }
 ```
 Minimum role: None  
+Response: 200 OK (magic link sent via email)
+
+#### /session/verify (GET)
+Verifies the magic link token and creates a session.
+Query param: token (required)
 ```
 {
     "id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -344,6 +368,7 @@ Minimum role: None
     "expiry": 1722276000
 }
 ```
+Minimum role: None  
 
 #### /session/:session_id (DELETE)
 Deletes the session (logout).  
@@ -497,7 +522,7 @@ Removes asset from fleet.
 Minimum role: Owner  
 
 #### /fleet/:fleet_id (GET)
-Returns fleet data.
+Returns fleet data, including associated asset templates and assets.
 ```
 {
     "id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
@@ -506,7 +531,15 @@ Returns fleet data.
         "name": "Test Fleet A",
         "description": "A fleet for testing the API",
         "port": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be"
-    }
+    },
+    "templates": [
+        "080144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ],
+    "assets": [
+        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+        "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7"
+    ]
 }
 ```
 Minimum role: Viewer  
@@ -561,7 +594,7 @@ Creates a new asset.
 Minimum role: Owner  
 
 #### /asset/:asset_id (GET)
-Returns asset data, including asset parts with inspection frequency.
+Returns asset data, including asset parts with inspection frequency and attachments.
 ```
 {
     "id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
@@ -573,6 +606,10 @@ Returns asset data, including asset parts with inspection frequency.
         "date_install": 697697669,
         "warranty": "1y"
     },
+    "attachments": [
+        "https://storage.example.com/attachments/asset_photo1.jpg",
+        "https://storage.example.com/attachments/asset_doc1.pdf"
+    ],
     "components": [
         {
             "id": "5f873f7e0bd101ba77dbc40a6ea76771cfe5a5e0ef3da03938a282821ef4c0d6",
@@ -580,7 +617,10 @@ Returns asset data, including asset parts with inspection frequency.
             "serial_number": "12345",
             "condition": "new",
             "notes": "Installed",
-            "inspection_frequency": 30
+            "inspection_frequency": 30,
+            "attachments": [
+                "https://storage.example.com/attachments/part_photo1.jpg"
+            ]
         },
         {
             "id": "d1a6c49d4c0cb7b729ed20a20f17f4d7c5f3a2d52246d49786019b9fd729e254",
@@ -588,7 +628,8 @@ Returns asset data, including asset parts with inspection frequency.
             "serial_number": "67890",
             "condition": "functional",
             "notes": "Fully charged",
-            "inspection_frequency": 14
+            "inspection_frequency": 14,
+            "attachments": []
         },
         {
             "id": "e62b95cc85caf807581870b03be48547b5f0edb07160eb10b5d2b320f6a8f49c",
@@ -596,12 +637,37 @@ Returns asset data, including asset parts with inspection frequency.
             "serial_number": "11223",
             "condition": "new",
             "notes": "Calibrated",
-            "inspection_frequency": 60
+            "inspection_frequency": 60,
+            "attachments": [
+                "https://storage.example.com/attachments/camera_calib_doc.pdf"
+            ]
         }
     ]
 }
 ```
 Minimum role: Viewer  
+
+#### /asset/:asset_id/attachment (POST)
+Adds an attachment URI to the asset. (Assumes client uploads file to external storage and provides URI; alternatively, endpoint can support multipart/form-data for direct upload.)
+```
+{
+    "uri": "https://storage.example.com/attachments/new_asset_photo.jpg",
+    "name": "Asset Photo",
+    "mime_type": "image/jpeg"
+}
+```
+Minimum role: Editor  
+Returns the created attachment:
+```
+{
+    "id": "new_attachment_id",
+    "uri": "https://storage.example.com/attachments/new_asset_photo.jpg"
+}
+```
+
+#### /asset/:asset_id/attachment/:attachment_id (DELETE)
+Deletes an attachment from the asset.  
+Minimum role: Owner  
 
 #### /asset/:asset_id/inspections/schedule (POST)
 Schedules an inspection for an asset.
@@ -656,7 +722,7 @@ Minimum role: Reporter
 ```
 
 #### /asset/:asset_id/inspections (GET)
-Returns all inspections for an asset.
+Returns all inspections for an asset, including attachments for each inspection.
 ```
 {
     "id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
@@ -667,7 +733,10 @@ Returns all inspections for an asset.
             "fields": {
                 "asset_id": "980144e66414d1b752ed4e8c3159876ebcc623e611b97d05be8b099518ff08be",
                 "time": 7978894354358
-            }
+            },
+            "attachments": [
+                "https://storage.example.com/attachments/inspection_photo1.jpg"
+            ]
         },
         {
             "id": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
@@ -679,7 +748,11 @@ Returns all inspections for an asset.
                 "condition": "new",
                 "notes": "was damaged",
                 "time": 78269786307
-            }
+            },
+            "attachments": [
+                "https://storage.example.com/attachments/replacement_evidence.pdf",
+                "https://storage.example.com/attachments/damage_photo.jpg"
+            ]
         }
     ]
 }
@@ -700,6 +773,48 @@ Minimum role: Editor
 Deletes an inspection.
 Minimum role: Owner  
 
+#### /inspection/:inspection_id/attachment (POST)
+Adds an attachment URI to the inspection. (Assumes client uploads file to external storage and provides URI; alternatively, endpoint can support multipart/form-data for direct upload.)
+```
+{
+    "uri": "https://storage.example.com/attachments/new_inspection_photo.jpg",
+    "name": "Inspection Photo",
+    "mime_type": "image/jpeg"
+}
+```
+Minimum role: Reporter  
+Returns the created attachment:
+```
+{
+    "id": "new_attachment_id",
+    "uri": "https://storage.example.com/attachments/new_inspection_photo.jpg"
+}
+```
+
+#### /inspection/:inspection_id/attachment/:attachment_id (DELETE)
+Deletes an attachment from the inspection.  
+Minimum role: Editor  
+
+#### /asset-part/:asset_part_id (GET)
+Returns asset part data, including attachments.
+```
+{
+    "id": "5f873f7e0bd101ba77dbc40a6ea76771cfe5a5e0ef3da03938a282821ef4c0d6",
+    "type": "asset-part",
+    "fields": {
+        "name": "Front-left rotor blades",
+        "serial_number": "12345",
+        "condition": "new",
+        "notes": "Installed",
+        "inspection_frequency": 30
+    },
+    "attachments": [
+        "https://storage.example.com/attachments/part_photo1.jpg"
+    ]
+}
+```
+Minimum role: Viewer  
+
 #### /asset-part/:asset_part_id (PATCH)
 Updates an asset part's fields, including inspection frequency.
 ```
@@ -709,3 +824,24 @@ Updates an asset part's fields, including inspection frequency.
 ```
 Minimum role: Editor  
 
+#### /asset-part/:asset_part_id/attachment (POST)
+Adds an attachment URI to the asset part. (Assumes client uploads file to external storage and provides URI; alternatively, endpoint can support multipart/form-data for direct upload.)
+```
+{
+    "uri": "https://storage.example.com/attachments/new_part_photo.jpg",
+    "name": "Part Photo",
+    "mime_type": "image/jpeg"
+}
+```
+Minimum role: Editor  
+Returns the created attachment:
+```
+{
+    "id": "new_attachment_id",
+    "uri": "https://storage.example.com/attachments/new_part_photo.jpg"
+}
+```
+
+#### /asset-part/:asset_part_id/attachment/:attachment_id (DELETE)
+Deletes an attachment from the asset part.  
+Minimum role: Owner
