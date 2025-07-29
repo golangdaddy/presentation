@@ -108,15 +108,6 @@ Below is an ASCII diagram illustrating the relationships between the domain enti
 
 ### Database Schemas
 
-#### Roles
-```sql
-CREATE TABLE Roles (
-    id VARCHAR(64) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL UNIQUE,  -- e.g., 'Viewer', 'Reporter', 'Editor', 'Owner'
-    level INT NOT NULL  -- e.g., 1 for Viewer, 2 for Reporter, 3 for Editor, 4 for Owner
-);
-```
-
 #### Ports
 ```sql
 CREATE TABLE Ports (
@@ -272,6 +263,15 @@ CREATE TABLE Manufacturers (
     country VARCHAR(255),
     time_created BIGINT NOT NULL,
     time_updated BIGINT NOT NULL
+);
+```
+
+#### Roles
+```sql
+CREATE TABLE Roles (
+    id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL UNIQUE,  -- e.g., 'Viewer', 'Reporter', 'Editor', 'Owner'
+    level INT NOT NULL  -- e.g., 1 for Viewer, 2 for Reporter, 3 for Editor, 4 for Owner
 );
 ```
 
