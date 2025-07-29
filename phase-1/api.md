@@ -287,7 +287,7 @@ CREATE TABLE Users (
 ### Authentication and Authorization
 
 - All endpoints (except login) require `Authorization: Bearer <session_id>` header.
-- Session validation: Check expiry and user existence.
+- Session validation: Check expiry and user existence via PKI, cached with a TTL of 5 mins to check for early recovation.
 - Role enforcement: Compute effective role per request; return 403 if insufficient.
 
 ### User Management
